@@ -14,9 +14,9 @@ TARGET_ACCOUNT_COUNT = 15000
 RESULTS_PER_HASHTAG = 500  # Maximum number of results to collect per hashtag
 REQUEST_DELAY = 2  # Delay between requests to avoid hitting rate limits
 MAX_RESULTS_PER_REQUEST = 50  # Maximum allowed per request by YouTube Data API
-API_KEYS = ["AIzaSyD9dXk7z7YNKYitqrIrUPzo0UQxc-ouTdU", 
-            "AIzaSyCDA6kmi6yyUUsNHjhwu7h_BoZKDY76NHw", 
-            "AIzaSyD7IbU3gXPMhcGhZN20U_QzoeFwnpIKrF0"]  # Replace with your actual API keys
+API_KEYS = ["", 
+            "", 
+            ""]  # Replace with your actual API keys
 key_index = 0
 
 state_file = "script_state.json"
