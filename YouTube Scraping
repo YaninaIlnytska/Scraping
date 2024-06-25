@@ -1,0 +1,219 @@
+import sys
+import time
+import re
+import csv
+import json
+from googleapiclient.discovery import build
+
+# Append custom site-packages path
+sys.path.append('/Users/yanailnytskaya/anaconda3/lib/python3.10/site-packages')
+from bs4 import BeautifulSoup
+
+# Configuration for delays and retry limitations
+TARGET_ACCOUNT_COUNT = 15000
+RESULTS_PER_HASHTAG = 500  # Maximum number of results to collect per hashtag
+REQUEST_DELAY = 2  # Delay between requests to avoid hitting rate limits
+MAX_RESULTS_PER_REQUEST = 50  # Maximum allowed per request by YouTube Data API
+API_KEYS = ["AIzaSyD9dXk7z7YNKYitqrIrUPzo0UQxc-ouTdU", 
+            "AIzaSyCDA6kmi6yyUUsNHjhwu7h_BoZKDY76NHw", 
+            "AIzaSyD7IbU3gXPMhcGhZN20U_QzoeFwnpIKrF0"]  # Replace with your actual API keys
+key_index = 0
+
+state_file = "script_state.json"
+
+def get_next_api_key():
+    global key_index
+    key_index = (key_index + 1) % len(API_KEYS)
+    print(f"Switching to API key: {API_KEYS[key_index]}")
+    return API_KEYS[key_index]
+
+def initialize_youtube_client():
+    api_key = get_next_api_key()
+    print(f"Using API key: {api_key}")
+    return build('youtube', 'v3', developerKey=api_key)
+
+youtube = initialize_youtube_client()
+
+categories = {
+    "Sustainability & Offgrid Living": ["SustainableLiving", "EcoFriendly", "OffGridLife", "GreenLiving", "RenewableEnergy"],
+    "Vanlife & Nomadic Living": ["VanLife", "VanConversion", "NomadicLifestyle", "TravelVlog", "VanLifeDiaries"],
+    "Outdoor & Nature": ["HikingAdventures", "CampingLife", "WildlifePhotography", "OutdoorSurvival", "NatureLovers"]
+}
+
+state = {
+    "category_index": 0,
+    "hashtag_index": 0,
+    "account_count": 0
+}
+
+def save_state():
+    with open(state_file, 'w') as f:
+        json.dump(state, f)
+
+def load_state():
+    global state
+    try:
+        with open(state_file, 'r') as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        save_state()
+
+def search_channels_by_keyword(keyword):
+    global youtube, state
+    try:
+        results_collected = 0
+        next_page_token = None
+        while results_collected < RESULTS_PER_HASHTAG and state["account_count"] < TARGET_ACCOUNT_COUNT:
+            request = youtube.search().list(
+                q=keyword,
+                part="snippet",
+                type="channel",
+                maxResults=min(MAX_RESULTS_PER_REQUEST, RESULTS_PER_HASHTAG - results_collected),
+                pageToken=next_page_token
+            )
+            response = request.execute()
+            if "items" in response and response["items"]:
+                for item in response["items"]:
+                    channel_id = item["snippet"]["channelId"]
+                    channel_info = get_channel_info(channel_id)
+                    if channel_info:
+                        write_channel_info_to_csv(channel_info)
+                        results_collected += 1
+                        state["account_count"] += 1
+                        save_state()
+                        if state["account_count"] >= TARGET_ACCOUNT_COUNT:
+                            print("Reached target account count")
+                            return
+            next_page_token = response.get("nextPageToken")
+            if not next_page_token:
+                break  # No more pages, exit loop
+            time.sleep(REQUEST_DELAY)
+    except Exception as e:
+        print(f"An error occurred while searching for channels with keyword {keyword}: {e}")
+        if "quota" in str(e):
+            print("Quota limit reached. Switching API key.")
+            youtube = initialize_youtube_client()
+            search_channels_by_keyword(keyword)  # Retry with new API key
+
+def get_channel_info(channel_id):
+    global youtube
+    try:
+        request = youtube.channels().list(
+            part="snippet,statistics",
+            id=channel_id,
+        )
+        response = request.execute()
+        if "items" in response and response["items"]:
+            channel_data = response["items"][0]
+            snippet = channel_data.get("snippet", {})
+            statistics = channel_data.get("statistics", {})
+            channel_url = f"https://www.youtube.com/channel/{channel_id}"
+            
+            # Extract the unique username that starts with @ from the snippet
+            handle = snippet.get("customUrl", "")
+            if not handle.startswith("@"):
+                handle = ""  # If customUrl is not @ handle set handle as empty
+
+            # Ensure the channel is from the US and has more than 5000 subscribers
+            subscribers = int(statistics.get("subscriberCount", 0))
+            country = snippet.get("country", "")
+
+            if subscribers >= 5000 and country == "US":
+                # Extract email from description
+                email = extract_email_from_description(snippet)
+                # Only return channel_info if both conditions are satisfied
+                channel_info = {
+                    "Handle": handle,
+                    "First Name": "",  # YouTube handles don't usually contain names so these would be empty
+                    "Last Name": "",   # Same as above
+                    "Platform": "YouTube",
+                    "Subscribers": subscribers,
+                    "Country": country,
+                    "Creator Email": email,
+                    "Creator Phone Number": extract_phone_number_from_description(snippet),
+                    "Profile URL": channel_url,
+                    "Personal URL": extract_personal_url_from_description(snippet)
+                }
+                return channel_info
+    except Exception as e:
+        print(f"An error occurred while fetching channel info for {channel_id}: {e}")
+        if "quota" in str(e):
+            print("Quota limit reached. Switching API key.")
+            youtube = initialize_youtube_client()
+            return get_channel_info(channel_id)  # Retry with new API key
+    return None
+
+def extract_email_from_description(channel_data):
+    # Add logic to extract emails from the channel description or data
+    email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    email_match = re.search(email_pattern, channel_data.get("description", ""))
+    return email_match.group() if email_match else ""
+
+def extract_phone_number_from_description(channel_data):
+    # Add logic to extract phone numbers from the channel description or data
+    phone_number_pattern = r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
+    phone_number_match = re.search(phone_number_pattern, channel_data.get("description", ""))
+    return phone_number_match.group() if phone_number_match else ""
+
+def extract_personal_url_from_description(channel_data):
+    # Add logic to extract personal URLs from the channel description or data
+    url_pattern = r"(https?://\S+)"
+    urls = re.findall(url_pattern, channel_data.get("description", ""))
+    return urls[0] if urls else ""
+
+def write_channel_info_to_csv(channel_info):
+    unique_handles = set()  # Set to store unique handles
+    
+    # Read existing usernames from the CSV file
+    try:
+        with open("camper_info.csv", "r", newline="", encoding="utf-8") as existing_file:
+            existing_reader = csv.DictReader(existing_file)
+            for row in existing_reader:
+                unique_handles.add(row["Handle"])
+    except FileNotFoundError:
+        pass  # If the file doesn't exist yet
+    
+    with open("camper_info.csv", "a", newline="", encoding="utf-8") as csv_file:
+        fieldnames = ["Handle", "First Name", "Last Name", "Platform", "Subscribers", "Country", "Creator Email", "Creator Phone Number", "Profile URL", "Personal URL"]
+        csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        
+        # Ensure the handle is unique before writing to the CSV
+        unique_handle = channel_info["Handle"]
+        while unique_handle in unique_handles:
+            unique_handle += "_1"  # Append _1 if the handle already exists
+        unique_handles.add(unique_handle)  # Add the unique handle to the set
+        
+        # Write the channel info with the unique handle to the CSV file
+        csv_writer.writerow({
+            "Handle": unique_handle,
+            "First Name": channel_info.get("First Name", ""),
+            "Last Name": channel_info.get("Last Name", ""),
+            "Platform": channel_info.get("Platform", ""),
+            "Subscribers": channel_info.get("Subscribers", ""),
+            "Country": channel_info.get("Country", ""),
+            "Creator Email": channel_info.get("Creator Email", ""),
+            "Creator Phone Number": channel_info.get("Creator Phone Number", ""),
+            "Profile URL": channel_info.get("Profile URL", ""),
+            "Personal URL": channel_info.get("Personal URL", "")
+        })
+
+load_state()
+
+category_names = list(categories.keys())
+for category_index in range(state["category_index"], len(category_names)):
+    category = category_names[category_index]
+    hashtags = categories[category]
+    print(f"Processing category: {category}")
+    for hashtag_index in range(state["hashtag_index"], len(hashtags)):
+        hashtag = hashtags[hashtag_index]
+        if state["account_count"] >= TARGET_ACCOUNT_COUNT:
+            print("Reached target account count")
+            break
+        search_channels_by_keyword(hashtag)
+        state["hashtag_index"] += 1
+        save_state()
+    if state["account_count"] >= TARGET_ACCOUNT_COUNT:
+        break
+    state["category_index"] += 1
+    state["hashtag_index"] = 0
+    save_state()
